@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Imposter</title>
+<style>
+:root{--bg:#120d2b;--card:#1e1747;--ac:#7cf5ff;--pk:#ff4fd8;--tx:#eee}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at top,#2a1a6e,var(--bg)) fixed;color:var(--tx);font:16px/1.4 system-ui,sans-serif;min-height:100vh}
+main{max-width:520px;margin:auto;padding:14px}
+h1,h2{margin:.3em 0}
+.card{background:var(--card);border-radius:14px;padding:14px;margin:10px 0;box-shadow:0 0 18px #7cf5ff22;transition:all .3s}
+#app>*{animation:in .3s}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+button,input,select,textarea{font:inherit;border-radius:10px;border:1px solid #4b3fa0;background:#2b2266;color:var(--tx);padding:10px;margin:3px 0;width:100%}
+button{background:linear-gradient(90deg,var(--pk),#7a4dff);border:0;cursor:pointer;font-weight:600}
+button.g{background:#2b2266;border:1px solid var(--ac)}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--ac)}
+label{display:block;font-size:13px;opacity:.85}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.pl{display:flex;align-items:center;gap:8px;padding:5px 0}
+.pl button{width:auto;padding:6px 12px}
+.dot{width:28px;height:28px;border-radius:50%;flex:none;border:3px solid transparent;display:inline-block}
+.dot.sw{cursor:pointer}.dot.sel{border-color:#fff}
+.sp{border-color:#3f6!important;box-shadow:0 0 10px #3f6}
+.dim{opacity:.55}
+.word{font-size:26px;text-align:center;color:var(--ac);margin:4px 0}
+.top{display:flex;justify-content:space-between;align-items:center}
+#tm{color:var(--pk);font-weight:700}
+#chat{height:110px;overflow:auto;font-size:14px;margin-bottom:6px}
+#toast{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:var(--ac);color:#000;padding:8px 14px;border-radius:20px;opacity:0;transition:.3s;pointer-events:none;z-index:9}
+#toast.on{opacity:1}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="toast" role="status" aria-live="polite"></div>
+<main>
+  <div id="app"></div>
+  <!-- Persistent chat panel (kept outside #app so typing isn't wiped by re-renders) -->
+  <div class="card" id="chatc" hidden>
+    <div id="chat" aria-live="polite" aria-label="Chat"></div>
+    <div class="row">
+      <input id="ci" maxlength="200" placeholder="Message" aria-label="Chat message" onkeydown="event.key=='Enter'&&say()">
+      <button style="flex:0 0 52px" onclick="say()" aria-label="Send">➤</button>
+      <button class="g" style="flex:0 0 52px" onclick="say(1)" aria-label="Send anonymous hint" title="Anonymous hint">🎭</button>
+    </div>
+  </div>
+</main>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// ======================= State & helpers =======================
+const $ = s => document.querySelector(s), S = io();
+const COLORS = ['#ff4fd8','#7cf5ff','#ffd24f','#6dff8a','#ff7a4f','#a98bff','#4f8bff','#ff4f6d'];
+const FAKES = ['common','daily','popular','classic','fun','big','old','nice','easy','famous'];
+let st = null, color = localStorage.col || COLORS[0], sus = {}, ms = null, home_ = {};
+const speaking = {}, pcs = {};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+const act = (e, d) => S.emit(e, d);
+function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 2500); }
+
+// ======================= Views =======================
+function home() {
+  const q = new URLSearchParams(location.search).get('room') || '';
+  return `<h1>🕵️ Imposter</h1><div class="card">
+    <input id="nm" maxlength="14" placeholder="Nickname" aria-label="Nickname" value="${esc(localStorage.nm || '')}">
+    <div class="row" role="radiogroup" aria-label="Avatar color">${COLORS.map(c => `<span class="dot sw ${c == color ? 'sel' : ''}" role="radio" tabindex="0" aria-checked="${c == color}" style="background:${c}" onclick="pick('${c}')" onkeydown="event.key=='Enter'&&pick('${c}')"></span>`).join('')}</div>
+    <input id="rc" maxlength="6" placeholder="Room code" aria-label="Room code" value="${esc(home_.rc || q.toUpperCase())}" style="text-transform:uppercase">
+    <input id="pw" type="password" maxlength="20" placeholder="Password (optional)" aria-label="Room password">
+    <div class="row"><button onclick="go('create')">Create room</button><button class="g" onclick="go('join')">Join room</button></div></div>`;
+}
+function plist(f) {
+  return st.players.map(p => `<div class="pl" data-id="${p.id}"><span class="dot ${speaking[p.id] ? 'sp' : ''}" style="background:${p.color}"></span>
+    <span style="flex:1" class="${p.on ? '' : 'dim'}">${esc(p.name)}${p.id == st.host ? ' 👑' : ''}${p.ready ? ' ✅' : ''} <small>${p.score}pt</small></span>${f ? f(p) : ''}</div>`).join('');
+}
+const vbtn = () => st.set.voice ? `<button class="g" onclick="voice()">${ms ? '🔇 Leave voice' : '🎙 Join voice'}</button>${ms ? `<button class="g" onclick="mute()">🎤 Mute / unmute</button>` : ''}` : '';
+function settings() {
+  const s = st.set, o = (a, v) => a.map(x => `<option ${x == v ? 'selected' : ''}>${x}</option>`).join('');
+  return `<div onchange="setS()"><div class="row">
+    <label>Imposters<select id="s1">${o([1, 2, 3], s.imposters)}</select></label>
+    <label>Discuss (s)<select id="s2">${o([60, 90, 120, 180, 300], s.timer)}</select></label>
+    <label>Clue rounds<select id="s3">${o([1, 2, 3], s.rounds)}</select></label></div>
+    <div class="row"><label>Category<select id="s4">${o(st.cats, s.category)}</select></label>
+    <label>Mode<select id="s5">${o(['classic', 'blind'], s.mode)}</select></label></div>
+    <label><input type="checkbox" id="s6" ${s.voice ? 'checked' : ''} style="width:auto"> Voice chat</label>
+    <label>Custom words (word,decoy per line)<textarea id="s7" rows="3">${esc(s.customText)}</textarea></label></div>`;
+}
+function lobby() {
+  const H = st.host == st.me, me = st.players.find(p => p.id == st.me);
+  return `<h1>Room ${st.code}</h1><div class="card"><button class="g" onclick="copy()">📋 Copy invite link</button>
+    ${plist(p => H && p.id != st.me ? `<button class="g" aria-label="Kick ${esc(p.name)}" onclick="act('kick','${p.id}')">✕</button>` : '')}</div>
+    <div class="card">${H ? settings() + `<button onclick="act('start')">▶ Start game (min 3)</button>` :
+      `<button onclick="act('ready')">${me.ready ? '✅ Ready' : 'Ready up'}</button><p class="dim">${st.set.category} · ${st.set.imposters} imposter(s) · ${st.set.mode}</p>`}
+    ${vbtn()}<button class="g" onclick="leave()">Leave</button></div>`;
+}
+function game() {
+  const H = st.host == st.me, t = st.players.find(p => p.id == st.turn), P = st.phase;
+  const label = { clue: `Clue round ${st.round}/${st.set.rounds}`, talk: 'Discuss!', vote: 'Vote!', reveal: 'Results' }[P];
+  const role = st.imp ? (st.word ? `🕵️ Imposter — your word: ${esc(st.word)}` : '🕵️ You are the imposter (no word)') : `Word: ${esc(st.word)}`;
+  let c = '';
+  if (P == 'clue') {
+    c = st.turn == st.me ? `<input id="clue" maxlength="20" placeholder="One-word clue" aria-label="Your clue" onkeydown="event.key=='Enter'&&clue()"><button onclick="clue()">Send clue</button>` : `<p>Waiting for <b>${esc(t?.name)}</b>…</p>`;
+    if (st.imp) c += `<div class="row"><button class="g" onclick="fake()">🎭 Fake clue</button>${st.sab ? `<button class="g" onclick="act('sab')">⏱ Sabotage</button>` : ''}</div>`;
+  }
+  if (P == 'talk') c = '<p>Talk it out in voice or chat. 🔍 marks someone suspicious (only you see it). 🎭 sends an anonymous hint.</p>';
+  if (P == 'vote') c = '<p>Who is the imposter?</p>';
+  if (P == 'reveal') { const r = st.result; c = `<h2>${r.caught ? '🎉 Imposter caught!' : '😈 Imposters win!'}</h2><p>Imposter(s): <b>${r.imp.map(esc).join(', ')}</b><br>Word: <b>${esc(r.word)}</b> · Decoy: <b>${esc(r.decoy)}</b></p>
+    <p>Votes: ${Object.entries(r.tally).map(([n, v]) => esc(n) + ' ' + v).join(', ') || 'none'}</p>${H ? `<button onclick="act('again')">Back to lobby</button>` : '<p class="dim">Waiting for host…</p>'}`; }
+  const f = p => P == 'vote' ? (p.id != st.me ? `<button class="${st.myVote == p.id ? '' : 'g'}" onclick="act('vote','${p.id}')">Vote</button>` : '') :
+    P != 'reveal' && p.id != st.me ? `<button class="g" aria-label="Mark suspicious" onclick="sus['${p.id}']^=1;render()">${sus[p.id] ? '🔴' : '🔍'}</button>` : '';
+  return `<div class="top"><h2>${label}</h2><span id="tm"></span></div>
+    <div class="card"><div class="word">${role}</div></div>
+    <div class="card">${st.clues.map(x => `<div><b style="color:${x.color}">${esc(x.name)}</b>: ${esc(x.text)}</div>`).join('') || '<span class="dim">No clues yet</span>'}</div>
+    <div class="card">${c}${P != 'reveal' && H ? `<button class="g" onclick="act('skip')">⏭ Skip phase</button>` : ''}</div>
+    <div class="card">${plist(f)}${vbtn()}</div>`;
+}
+function render() {
+  const focus = document.activeElement?.id == 'clue', k = $('#clue')?.value;
+  $('#chatc').hidden = !st;
+  $('#app').innerHTML = st ? (st.phase == 'lobby' ? lobby() : game()) : home();
+  if ($('#clue') && k) $('#clue').value = k;
+  if (focus && $('#clue')) $('#clue').focus();
+}
+
+// ======================= Actions =======================
+function pick(c) { home_ = { rc: $('#rc').value }; localStorage.nm = $('#nm').value; color = localStorage.col = c; render(); }
+function go(ev) {
+  const name = $('#nm').value.trim(); if (!name) return toast('Enter a nickname.');
+  localStorage.nm = name;
+  act(ev, { name, color, pass: $('#pw').value, code: $('#rc').value.trim().toUpperCase() });
+}
+const setS = () => act('set', { imposters: $('#s1').value, timer: $('#s2').value, rounds: $('#s3').value, category: $('#s4').value, mode: $('#s5').value, voice: $('#s6').checked, customText: $('#s7').value });
+function clue() { const v = $('#clue').value; if (v.trim()) act('clue', v); }
+function fake() { const w = FAKES[Math.floor(Math.random() * FAKES.length)]; if ($('#clue')) $('#clue').value = w; else toast('Try a vague clue like "' + w + '"'); }
+function say(anon) { const v = $('#ci').value.trim(); if (v) { act('chat', { text: v, anon }); $('#ci').value = ''; } }
+function copy() { const u = location.origin + '/?room=' + st.code; (navigator.clipboard?.writeText(u) || Promise.reject()).then(() => toast('Link copied!'), () => prompt('Copy this link:', u)); }
+function leave() { act('leave'); localStorage.removeItem('sess'); stopVoice(); st = null; render(); }
+
+// ======================= Socket events =======================
+S.on('connect', () => { const s = JSON.parse(localStorage.sess || 'null'); if (s) act('resume', s); });
+S.on('joined', d => { localStorage.sess = JSON.stringify(d); });
+S.on('noresume', () => { localStorage.removeItem('sess'); st = null; render(); });
+S.on('err', toast);
+S.on('kicked', () => { localStorage.removeItem('sess'); stopVoice(); st = null; render(); toast('You were kicked.'); });
+S.on('state', s => { st = s; st.end = s.left ? Date.now() + s.left : 0; if (!s.set.voice) stopVoice(); render(); });
+S.on('chat', m => {
+  const d = document.createElement('div');
+  d.innerHTML = m.sys ? `<i class="dim">${esc(m.text)}</i>` : `<b style="color:${m.color}">${esc(m.name)}</b>: ${esc(m.text)}`;
+  $('#chat').append(d); $('#chat').scrollTop = 1e9; if (m.sys) toast(m.text);
+});
+setInterval(() => { const e = $('#tm'); if (e) e.textContent = st?.end ? Math.max(0, Math.round((st.end - Date.now()) / 1000)) + 's' : ''; }, 500);
+
+// ======================= Voice chat (native WebRTC mesh) =======================
+function meter(stream, id) { // speaking indicator: animate green ring when audio level is high
+  const c = new AudioContext(), a = c.createAnalyser(), d = new Uint8Array(a.fftSize);
+  c.createMediaStreamSource(stream).connect(a);
+  const t = setInterval(() => {
+    if (!stream.active) { clearInterval(t); return; }
+    a.getByteTimeDomainData(d); const on = d.some(x => Math.abs(x - 128) > 12);
+    if (on !== !!speaking[id]) { speaking[id] = on; document.querySelectorAll(`[data-id="${id}"] .dot`).forEach(e => e.classList.toggle('sp', on)); }
+  }, 200);
+}
+async function voice() {
+  if (ms) return stopVoice();
+  try { ms = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { return toast('Mic blocked — use text chat instead.'); }
+  meter(ms, st.me); act('voice-join'); render();
+}
+function stopVoice() {
+  if (!ms) return;
+  ms.getTracks().forEach(t => t.stop()); ms = null; act('voice-leave');
+  Object.keys(pcs).forEach(dropPeer); render();
+}
+function mute() { const t = ms.getAudioTracks()[0]; t.enabled = !t.enabled; toast(t.enabled ? 'Mic on' : 'Mic muted'); }
+function dropPeer(id) { pcs[id]?.close(); delete pcs[id]; document.getElementById('a' + id)?.remove(); }
+function peer(id) {
+  if (pcs[id]) return pcs[id];
+  const pc = pcs[id] = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  ms.getTracks().forEach(t => pc.addTrack(t, ms));
+  pc.onicecandidate = e => e.candidate && act('voice-ice', { to: id, data: e.candidate });
+  pc.ontrack = e => {
+    let a = document.getElementById('a' + id);
+    if (!a) { a = document.createElement('audio'); a.id = 'a' + id; a.autoplay = true; document.body.append(a); meter(e.streams[0], id); }
+    a.srcObject = e.streams[0];
+  };
+  return pc;
+}
+S.on('voice-peers', async ids => { for (const id of ids) { const pc = peer(id); await pc.setLocalDescription(await pc.createOffer()); act('voice-offer', { to: id, data: pc.localDescription }); } });
+S.on('voice-offer', async ({ from, data }) => { if (!ms) return; const pc = peer(from); await pc.setRemoteDescription(data); await pc.setLocalDescription(await pc.createAnswer()); act('voice-answer', { to: from, data: pc.localDescription }); });
+S.on('voice-answer', ({ from, data }) => pcs[from]?.setRemoteDescription(data));
+S.on('voice-ice', ({ from, data }) => pcs[from]?.addIceCandidate(data).catch(() => {}));
+S.on('voice-leave', dropPeer);
+
+render();
+</script>
+</body>
+</html>
